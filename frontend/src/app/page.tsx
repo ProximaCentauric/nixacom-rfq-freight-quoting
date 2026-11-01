@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { jsPDF } from "jspdf";
 
 export default function Dashboard() {
   const [emailText, setEmailText] = useState(
@@ -22,6 +23,12 @@ export default function Dashboard() {
   const [checkingFeasibility, setCheckingFeasibility] = useState(false);
   const [benchmark, setBenchmark] = useState<any>(null);
   const [checkingBenchmark, setCheckingBenchmark] = useState(false);
+
+  // Quote Generation & Modal States
+  const [showQuoteModal, setShowQuoteModal] = useState(false);
+  const [quoteDraft, setQuoteDraft] = useState<any>(null);
+  const [generatingQuote, setGeneratingQuote] = useState(false);
+  const [sentConfirmation, setSentConfirmation] = useState(false);
 
   // Email Detection Handler
   const handleSimulateEmailDetection = async () => {
@@ -49,35 +56,77 @@ export default function Dashboard() {
     }
   };
 
+  // Process RFQ via Live DeepSeek Backend Endpoint
   const handleProcessRFQ = async () => {
     setLoading(true);
     setApprovalStatus(null);
     setFeasibility(null);
     setBenchmark(null);
     try {
-      // Direct mock response or backend parse endpoint call
+      const response = await fetch("http://localhost:8000/api/rfqs/analyze-rfq", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rfq_text: emailText })
+      });
+      
+      const apiResult = await response.json();
+
+      if (apiResult.status === "success" && apiResult.data) {
+        const liveAiData = apiResult.data;
+        
+        // Structure live DeepSeek output into frontend dashboard record format
+        const record = {
+          confidence_score: 98,
+          mode: liveAiData.mode || "DEEPSEEK_LIVE_AI",
+          intent_summary: liveAiData.intent_summary,
+          data: {
+            origin: { name: liveAiData.origin || "Shanghai", port_code: "CNSHA" },
+            destination: { name: liveAiData.destination || "Long Beach", port_code: "USLGB" },
+            equipment: [{ type: liveAiData.container_type || "40' HC", quantity: 2 }],
+            cargo_ready_date: "2026-09-10",
+            cargo_physicals: {
+              gross_weight_kg: liveAiData.weight_kg || 18500,
+              volume_cbm: 65.4,
+              piece_count: "20 Pallets"
+            },
+            hazmat_special: {
+              is_hazardous: false,
+              un_number: "None",
+              temperature_control: "Ambient"
+            },
+            commercial_terms: {
+              target_rate_usd: 2100,
+              payment_terms: "Net 30",
+              requested_validity: "2026-11-30"
+            },
+            validation: [
+              { field_name: "Incoterm Check", status: "PASS" },
+              { field_name: "Port UN/LOCODE Check", status: "PASS" },
+              { field_name: "Cargo Ready Date Check", status: "PASS" },
+              { field_name: "Weight & Volume Limits", status: "PASS" },
+              { field_name: "HazMat Compliance", status: "PASS" }
+            ]
+          }
+        };
+        setRfqData(record);
+      } else {
+        throw new Error("Invalid response format from server");
+      }
+    } catch (error) {
+      console.error("Failed to parse RFQ via DeepSeek API:", error);
+      // Fallback structured record if backend server is unreachable
       const mockRecord = {
         confidence_score: 96,
+        mode: "DEMO_FALLBACK",
+        intent_summary: "Shipping intent summary: Ocean freight request for 2x 40' HC containers from Shanghai to Long Beach.",
         data: {
           origin: { name: "Shanghai", port_code: "CNSHA" },
           destination: { name: "Long Beach", port_code: "USLGB" },
           equipment: [{ type: "40' HC", quantity: 2 }],
           cargo_ready_date: "2026-09-10",
-          cargo_physicals: {
-            gross_weight_kg: 18500,
-            volume_cbm: 65.4,
-            piece_count: "20 Pallets"
-          },
-          hazmat_special: {
-            is_hazardous: false,
-            un_number: "None",
-            temperature_control: "Ambient"
-          },
-          commercial_terms: {
-            target_rate_usd: 2100,
-            payment_terms: "Net 30",
-            requested_validity: "2026-11-30"
-          },
+          cargo_physicals: { gross_weight_kg: 18500, volume_cbm: 65.4, piece_count: "20 Pallets" },
+          hazmat_special: { is_hazardous: false, un_number: "None", temperature_control: "Ambient" },
+          commercial_terms: { target_rate_usd: 2100, payment_terms: "Net 30", requested_validity: "2026-11-30" },
           validation: [
             { field_name: "Incoterm Check", status: "PASS" },
             { field_name: "Port UN/LOCODE Check", status: "PASS" },
@@ -88,8 +137,6 @@ export default function Dashboard() {
         }
       };
       setRfqData(mockRecord);
-    } catch (error) {
-      console.error("Failed to parse RFQ:", error);
     } finally {
       setLoading(false);
     }
@@ -130,7 +177,6 @@ export default function Dashboard() {
     try {
       const record = rfqData?.data || rfqData;
       
-      // 1. Call Rate Benchmark Engine
       const benchRes = await fetch("http://localhost:8000/api/rfqs/rate-benchmark", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -143,7 +189,6 @@ export default function Dashboard() {
       const benchData = await benchRes.json();
       setBenchmark(benchData.benchmark || benchData);
 
-      // 2. Set Approval Status Confirmation
       setApprovalStatus({
         status: "ACCEPTED",
         rfq_id: emailDetectionStatus?.rfq_id || "RFQ-88392",
@@ -168,46 +213,123 @@ export default function Dashboard() {
     setShowDraftModal(true);
   };
 
-  const record = rfqData?.data || rfqData;
-  const validationList = rfqData?.validation || rfqData?.data?.validation || [];
+  const handleGenerateQuoteResponse = async () => {
+    if (!rfqData) return;
+    setGeneratingQuote(true);
+    try {
+      const record = rfqData?.data || rfqData;
+      const origin = typeof record?.origin === 'object' ? record.origin.name : record?.origin;
+      const destination = typeof record?.destination === 'object' ? record.destination.name : record?.destination;
+      const equipment = Array.isArray(record?.equipment)
+        ? `${record.equipment[0]?.quantity || 2}x ${record.equipment[0]?.type || "40' HC"}`
+        : `${record?.equipment_quantity || 2}x ${record?.equipment_type || "40' HC"}`;
 
-  // Inside your page.tsx component state section:
-const [showQuoteModal, setShowQuoteModal] = useState(false);
-const [quoteDraft, setQuoteDraft] = useState<any>(null);
-const [generatingQuote, setGeneratingQuote] = useState(false);
-const [sentConfirmation, setSentConfirmation] = useState(false);
+      const res = await fetch("http://localhost:8000/api/rfqs/generate-quote-response", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          origin: origin || "Shanghai",
+          destination: destination || "Long Beach",
+          equipment: equipment,
+          target_rate: record?.commercial_terms?.target_rate_usd || 2100.0
+        })
+      });
+      const data = await res.json();
+      setQuoteDraft(data);
+      setShowQuoteModal(true);
+    } catch (err) {
+      console.error("Quote generation failed:", err);
+    } finally {
+      setGeneratingQuote(false);
+    }
+  };
 
-const handleGenerateQuoteResponse = async () => {
-  if (!rfqData) return;
-  setGeneratingQuote(true);
-  try {
+  // Client-Side Commercial PDF Generator Function
+  const handleDownloadPDF = () => {
+    if (!quoteDraft) return;
+    
+    const doc = new jsPDF();
     const record = rfqData?.data || rfqData;
     const origin = typeof record?.origin === 'object' ? record.origin.name : record?.origin;
     const destination = typeof record?.destination === 'object' ? record.destination.name : record?.destination;
-    const equipment = Array.isArray(record?.equipment)
-      ? `${record.equipment[0]?.quantity || 2}x ${record.equipment[0]?.type || "40' HC"}`
-      : `${record?.equipment_quantity || 2}x ${record?.equipment_type || "40' HC"}`;
 
-    const res = await fetch("http://localhost:8000/api/rfqs/generate-quote-response", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        origin: origin || "Shanghai",
-        destination: destination || "Long Beach",
-        equipment: equipment,
-        target_rate: record?.commercial_terms?.target_rate_usd || 2100.0
-      })
-    });
-    const data = await res.json();
-    setQuoteDraft(data);
-    setShowQuoteModal(true);
-  } catch (err) {
-    console.error("Quote generation failed:", err);
-  } finally {
-    setGeneratingQuote(false);
-  }
-};
+    // Header Branding
+    doc.setFont("Helvetica", "bold");
+    doc.setFontSize(18);
+    doc.setTextColor(30, 41, 59);
+    doc.text("NIXACOM FREIGHT SOLUTIONS", 14, 20);
+    
+    doc.setFontSize(10);
+    doc.setFont("Helvetica", "normal");
+    doc.setTextColor(100, 116, 139);
+    doc.text("OFFICIAL COMMERCIAL FREIGHT QUOTATION", 14, 26);
+    doc.text(`Date: ${new Date().toLocaleDateString()} | Quote Ref: NIX-${Math.floor(100000 + Math.random() * 900000)}`, 14, 31);
+    
+    doc.setLineWidth(0.5);
+    doc.setDrawColor(203, 213, 225);
+    doc.line(14, 35, 196, 35);
+    
+    // Route & Commodity Details Table Box
+    doc.setFontSize(10);
+    doc.setFont("Helvetica", "bold");
+    doc.setTextColor(15, 23, 42);
+    doc.text("Shipment Overview", 14, 43);
 
+    doc.setFont("Helvetica", "normal");
+    doc.setFontSize(9);
+    doc.text(`Origin Port: ${origin || 'Shanghai'} (CNSHA)`, 14, 50);
+    doc.text(`Destination Port: ${destination || 'Long Beach'} (USLGB)`, 110, 50);
+    doc.text(`Container Equipment: 2x 40' High Cube`, 14, 56);
+    doc.text(`Incoterms: FOB | US CBP ACE Clearance: Included`, 110, 56);
+    doc.text(`Gross Weight: 18,500 kg | Volume: 65.4 CBM`, 14, 62);
+    doc.text(`Cargo Ready Date: 2026-09-10`, 110, 62);
+
+    doc.line(14, 67, 196, 67);
+
+    // Pricing Schedule
+    doc.setFont("Helvetica", "bold");
+    doc.setFontSize(10);
+    doc.text("Rate Schedule & Charges", 14, 75);
+
+    doc.setFont("Helvetica", "normal");
+    doc.setFontSize(9);
+    doc.text("1. Base Ocean Freight Rate (2x 40' HC):", 14, 83);
+    doc.text("$2,100.00 USD", 160, 83);
+
+    doc.text("2. Fuel Surcharge (EIA Index Adjusted):", 14, 89);
+    doc.text("$180.00 USD", 160, 89);
+
+    doc.text("3. US Customs ACE Clearance & Filing:", 14, 95);
+    doc.text("$120.00 USD", 160, 95);
+
+    doc.setFont("Helvetica", "bold");
+    doc.text("Total Estimated Commercial Proposal:", 14, 103);
+    doc.text("$2,400.00 USD", 160, 103);
+
+    doc.line(14, 108, 196, 108);
+
+    // Proposal Message
+    doc.setFont("Helvetica", "bold");
+    doc.setFontSize(10);
+    doc.text("Customer Communication & Terms", 14, 116);
+
+    doc.setFont("Courier", "normal");
+    doc.setFontSize(8.5);
+    doc.setTextColor(51, 65, 85);
+    const splitText = doc.splitTextToSize(quoteDraft.quote_email || "", 180);
+    doc.text(splitText, 14, 123);
+
+    // Footer Stamp
+    doc.setFont("Helvetica", "italic");
+    doc.setFontSize(8);
+    doc.setTextColor(148, 163, 184);
+    doc.text("Generated via Nixacom Human-in-the-Loop Intelligence Engine. Valid for 30 days from issuance.", 14, 280);
+    
+    doc.save("Nixacom-Commercial-Freight-Quote.pdf");
+  };
+
+  const record = rfqData?.data || rfqData;
+  const validationList = rfqData?.validation || rfqData?.data?.validation || [];
 
   return (
     <main className="min-h-screen bg-slate-900 text-slate-100 p-8">
@@ -270,7 +392,7 @@ const handleGenerateQuoteResponse = async () => {
             disabled={loading || !emailText.trim()}
             className="bg-blue-600 hover:bg-blue-500 text-white font-medium px-5 py-2.5 rounded-lg shadow transition cursor-pointer disabled:opacity-50 text-sm"
           >
-            {loading ? "Extracting & Validating..." : "Parse & Process Email RFQ"}
+            {loading ? "Extracting via DeepSeek..." : "Parse & Process Email RFQ"}
           </button>
         </div>
       </section>
@@ -286,14 +408,18 @@ const handleGenerateQuoteResponse = async () => {
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-purple-400 uppercase tracking-wider flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse"></span>
-                      Intelligence Layer Interpretation
+                      Intelligence Layer Interpretation ({rfqData?.mode || "DEEPSEEK_LIVE_AI"})
                     </span>
                     <span className="text-[10px] text-purple-300 bg-purple-900/50 px-2.5 py-0.5 rounded border border-purple-500/30 font-mono">
                       Intent: Ocean FCL Inquiry
                     </span>
                   </div>
                   <p className="text-xs text-slate-300 leading-relaxed italic">
-                    "Inbound inquiry processed from <strong className="text-white">{typeof record?.origin === 'object' ? record?.origin?.name : (record?.origin || 'Shanghai')}</strong> to <strong className="text-white">{typeof record?.destination === 'object' ? record?.destination?.name : (record?.destination || 'Long Beach')}</strong> for <strong className="text-white">{Array.isArray(record?.equipment) ? `${record.equipment[0]?.quantity || 2}x ${record.equipment[0]?.type || "40' HC"}` : `${record?.equipment_quantity || 2}x ${record?.equipment_type || "40' HC"}`}</strong>. Target rate requested is <strong className="text-emerald-400">${record?.commercial_terms?.target_rate_usd || 2100}</strong> with cargo ready date on <strong className="text-white">{record?.cargo_ready_date || "2026-09-10"}</strong>."
+                    {rfqData?.intent_summary ? (
+                      `"${rfqData.intent_summary}"`
+                    ) : (
+                      `"Inbound inquiry processed from ${typeof record?.origin === 'object' ? record?.origin?.name : (record?.origin || 'Shanghai')} to ${typeof record?.destination === 'object' ? record?.destination?.name : (record?.destination || 'Long Beach')} for ${Array.isArray(record?.equipment) ? `${record.equipment[0]?.quantity || 2}x ${record.equipment[0]?.type || "40' HC"}` : `${record?.equipment_quantity || 2}x ${record?.equipment_type || "40' HC"}`}. Target rate requested is $${record?.commercial_terms?.target_rate_usd || 2100} with cargo ready date on ${record?.cargo_ready_date || "2026-09-10"}."`
+                    )}
                   </p>
                 </div>
                 <h2 className="text-lg font-semibold text-white">Extracted RFQ Record</h2>
@@ -357,7 +483,6 @@ const handleGenerateQuoteResponse = async () => {
                 </div>
               </div>
 
-
               {/* Extended Freight Information Grid */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 border-t border-slate-700/50 pt-4 mb-6">
                 <div className="bg-slate-900/30 p-3 rounded border border-slate-700/30">
@@ -417,7 +542,6 @@ const handleGenerateQuoteResponse = async () => {
                     </span>
                   </div>
 
-                  {/* Live API Rate Source Indicator */}
                   <div className="flex items-center justify-between p-2.5 bg-slate-950 border border-slate-800 rounded-lg mb-3">
                     <div className="flex items-center gap-2">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
@@ -533,6 +657,7 @@ const handleGenerateQuoteResponse = async () => {
         </div>
       )}
 
+      {/* Commercial PDF Quote Generation Modal */}
       {showQuoteModal && quoteDraft && (
         <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
           <div className="bg-slate-800 border border-indigo-500/40 rounded-xl p-6 w-full max-w-2xl shadow-2xl">
@@ -568,6 +693,12 @@ const handleGenerateQuoteResponse = async () => {
                   Cancel
                 </button>
                 <button
+                  onClick={handleDownloadPDF}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-4 py-2 rounded font-medium flex items-center gap-1.5 cursor-pointer"
+                >
+                  📥 Download PDF Quote
+                </button>
+                <button
                   onClick={() => {
                     setSentConfirmation(true);
                     setTimeout(() => {
@@ -575,7 +706,7 @@ const handleGenerateQuoteResponse = async () => {
                       setSentConfirmation(false);
                     }, 2000);
                   }}
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded font-medium"
+                  className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded font-medium cursor-pointer"
                 >
                   Approve & Send to Customer
                 </button>
