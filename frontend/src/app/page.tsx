@@ -74,15 +74,16 @@ export default function Dashboard() {
       if (apiResult.status === "success" && apiResult.data) {
         const liveAiData = apiResult.data;
         
-        // Structure live DeepSeek output into frontend dashboard record format
+        // Dynamically map live DeepSeek output into frontend dashboard record format
         const record = {
-          confidence_score: 98,
+          confidence_score: liveAiData.confidence_score || 95, // <-- Dynamically reads backend confidence score
           mode: liveAiData.mode || "DEEPSEEK_LIVE_AI",
           intent_summary: liveAiData.intent_summary,
           data: {
-            origin: { name: liveAiData.origin || "Shanghai", port_code: "CNSHA" },
-            destination: { name: liveAiData.destination || "Long Beach", port_code: "USLGB" },
-            equipment: [{ type: liveAiData.container_type || "40' HC", quantity: 2 }],
+            origin: { name: liveAiData.origin || "Origin Port", port_code: liveAiData.origin || "PORT1" },
+            destination: { name: liveAiData.destination || "Destination Port", port_code: liveAiData.destination || "PORT2" },
+            // Dynamically bind quantity and container type from backend
+            equipment: [{ type: liveAiData.container_type || "40' HC", quantity: liveAiData.quantity || 1 }],
             cargo_ready_date: "2026-09-10",
             cargo_physicals: {
               gross_weight_kg: liveAiData.weight_kg || 18500,
@@ -95,7 +96,8 @@ export default function Dashboard() {
               temperature_control: "Ambient"
             },
             commercial_terms: {
-              target_rate_usd: 2100,
+              // Dynamically bind target rate from backend
+              target_rate_usd: liveAiData.target_rate_usd || 2100,
               payment_terms: "Net 30",
               requested_validity: "2026-11-30"
             },
@@ -116,9 +118,9 @@ export default function Dashboard() {
       console.error("Failed to parse RFQ via DeepSeek API:", error);
       // Fallback structured record if backend server is unreachable
       const mockRecord = {
-        confidence_score: 96,
+        confidence_score: 88,
         mode: "DEMO_FALLBACK",
-        intent_summary: "Shipping intent summary: Ocean freight request for 2x 40' HC containers from Shanghai to Long Beach.",
+        intent_summary: "Shipping intent summary: Ocean freight request extracted from input text.",
         data: {
           origin: { name: "Shanghai", port_code: "CNSHA" },
           destination: { name: "Long Beach", port_code: "USLGB" },
@@ -244,16 +246,101 @@ export default function Dashboard() {
     }
   };
 
-  // Client-Side Commercial PDF Generator Function
-  const handleDownloadPDF = () => {
+  // Client-Side Commercial TSU-Formatted PDF Generator Function
+  const handleDownloadPDF = async () => {
     if (!quoteDraft) return;
     
-    const doc = new jsPDF();
+    const doc = new jsPDF({ unit: 'mm', format: 'letter' });
     const record = rfqData?.data || rfqData;
     const origin = typeof record?.origin === 'object' ? record.origin.name : record?.origin;
     const destination = typeof record?.destination === 'object' ? record.destination.name : record?.destination;
+    
+    // ==========================================
+    // PAGE 1: TSU DARK BLUE COVER PAGE
+    // ==========================================
+    
+    // 1. Full-bleed Deep Navy Background (#1B2A4B)
+    doc.setFillColor(27, 42, 75);
+    doc.rect(0, 0, 215.9, 279.4, 'F');
 
-    // Header Branding
+    // Lighter Accent Top/Side Border Bars (Using a lighter blue tone, e.g., #1E3A8A or #3B82F6)
+    doc.setFillColor(50, 90, 179); // Lighter blue accent color
+    doc.rect(0, 0, 215.9, 12, 'F');  // Top bar
+    doc.rect(0, 0, 12, 279.4, 'F');  // Left bar
+
+    // 2. Dynamically Load Logo from Public Folder
+    try {
+      const response = await fetch('/logo.png');
+      const blob = await response.blob();
+      const reader = new FileReader();
+      
+      const logoBase64: string = await new Promise((resolve) => {
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.readAsDataURL(blob);
+      });
+
+      doc.addImage(logoBase64, 'PNG', 20, 22, 88, 50);
+    } catch (e) {
+      doc.setFont("Helvetica", "bold");
+      doc.setFontSize(24);
+      doc.setTextColor(72, 202, 228);
+      doc.text("NIXACOM AI", 20, 35);
+    }
+
+    // 3. Cover Metadata Fields (Bolded values)
+    const startY = 85;
+    const spacing = 38;
+
+    // Proposal For
+    doc.setFont("Helvetica", "bold"); // Ensure label is bold too if desired
+    doc.setFontSize(9);
+    doc.setTextColor(160, 174, 192);
+    doc.text("PROPOSAL FOR", 20, startY);
+    
+    doc.setFont("Helvetica", "bold"); // <-- BOLD TEXT SETTING HERE
+    doc.setFontSize(15);
+    doc.setTextColor(255, 255, 255);
+    doc.text(`Ocean Freight Route: ${origin || 'Shanghai'} to ${destination || 'Long Beach'}`, 20, startY + 7);
+
+    // Solicitation Number
+    doc.setFont("Helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(160, 174, 192);
+    doc.text("SOLICITATION NUMBER", 20, startY + spacing);
+    
+    doc.setFont("Helvetica", "bold"); // <-- BOLD TEXT SETTING HERE
+    doc.setFontSize(15);
+    doc.setTextColor(255, 255, 255);
+    doc.text(`SOL-2026-NIXACOM-${Math.floor(1000 + Math.random() * 9000)}`, 20, startY + spacing + 7);
+
+    // Submitted By
+    doc.setFont("Helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(160, 174, 192);
+    doc.text("SUBMITTED BY", 20, startY + (spacing * 2));
+    
+    doc.setFont("Helvetica", "bold"); // <-- BOLD TEXT SETTING HERE
+    doc.setFontSize(15);
+    doc.setTextColor(255, 255, 255);
+    doc.text("NIXACOM Freight Automation Team", 20, startY + (spacing * 2) + 7);
+
+    // Submission Date
+    doc.setFont("Helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(160, 174, 192);
+    doc.text("SUBMISSION DATE", 20, startY + (spacing * 3));
+    
+    doc.setFont("Helvetica", "bold"); // <-- BOLD TEXT SETTING HERE
+    doc.setFontSize(15);
+    doc.setTextColor(255, 255, 255);
+    doc.text(new Date().toISOString().split('T')[0], 20, startY + (spacing * 3) + 7);
+
+
+    // ==========================================
+    // PAGE 2: DETAILED REPORT & RATE SCHEDULE
+    // ==========================================
+    doc.addPage();
+
     doc.setFont("Helvetica", "bold");
     doc.setFontSize(18);
     doc.setTextColor(30, 41, 59);
@@ -269,7 +356,6 @@ export default function Dashboard() {
     doc.setDrawColor(203, 213, 225);
     doc.line(14, 35, 196, 35);
     
-    // Route & Commodity Details Table Box
     doc.setFontSize(10);
     doc.setFont("Helvetica", "bold");
     doc.setTextColor(15, 23, 42);
@@ -286,7 +372,6 @@ export default function Dashboard() {
 
     doc.line(14, 67, 196, 67);
 
-    // Pricing Schedule
     doc.setFont("Helvetica", "bold");
     doc.setFontSize(10);
     doc.text("Rate Schedule & Charges", 14, 75);
@@ -308,22 +393,20 @@ export default function Dashboard() {
 
     doc.line(14, 108, 196, 108);
 
-    // Proposal Message
     doc.setFont("Helvetica", "bold");
     doc.setFontSize(10);
     doc.text("Customer Communication & Terms", 14, 116);
 
-    doc.setFont("Courier", "normal");
-    doc.setFontSize(8.5);
+    doc.setFont("Helvetica", "normal");
+    doc.setFontSize(9);
     doc.setTextColor(51, 65, 85);
     const splitText = doc.splitTextToSize(quoteDraft.quote_email || "", 180);
     doc.text(splitText, 14, 123);
 
-    // Footer Stamp
     doc.setFont("Helvetica", "italic");
     doc.setFontSize(8);
     doc.setTextColor(148, 163, 184);
-    doc.text("Generated via Nixacom Human-in-the-Loop Intelligence Engine. Valid for 30 days from issuance.", 14, 280);
+    doc.text("Generated via Nixacom Human-in-the-Loop Intelligence Engine. Valid for 30 days from issuance.", 14, 270);
     
     doc.save("Nixacom-Commercial-Freight-Quote.pdf");
   };
