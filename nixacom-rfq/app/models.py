@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Column, DateTime, String, Float, JSON, Text
+from sqlalchemy import Column, DateTime, Float, Integer, JSON, String, Text
 from app.database import Base
 
 class RFQRecordModel(Base):
@@ -19,4 +19,21 @@ class RFQRecordModel(Base):
     raw_payload = Column(JSON, nullable=True)
     
     # Use lambda with timezone-aware datetime to avoid deprecation warnings
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+class LaneRateModel(Base):
+    """
+    One observed market rate for a lane, per 40' container (FEU).
+
+    lane_key is either a port pair ("CNSHA-USLGB", most precise) or a
+    regional index lane ("CEA-NAW"). Rows are append-only: the engine always
+    uses the newest as_of, and history stays available for audit/trend charts.
+    """
+    __tablename__ = "lane_rates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    lane_key = Column(String, nullable=False, index=True)
+    rate_usd_per_feu = Column(Float, nullable=False)
+    source = Column(String, nullable=False)  # e.g. "FBX export", "Maersk quote #123"
+    as_of = Column(DateTime, nullable=False, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

@@ -62,7 +62,7 @@ class QuoteResponseRequest(BaseModel):
     destination: str
     equipment: str
     target_rate: float
-    customer_email: str = "cargo.logistics@acme-import.com"
+    customer_email: str = ""
 
 class RFQAnalyzeRequest(BaseModel):
     rfq_text: str
@@ -93,14 +93,14 @@ async def create_rfq_from_email(payload: dict, db: Session = Depends(get_db)):
         rfq_id=generated_rfq_id,
         sender=sender,
         subject=subject,
-        origin="CNSHA",
-        destination="USLGB",
-        equipment_type="40' HC",
-        equipment_quantity=2.0,
-        target_rate_usd=2100.0,
-        confidence_score=96.0,
+        origin=None,
+        destination=None,
+        equipment_type=None,
+        equipment_quantity=None,
+        target_rate_usd=None,
+        confidence_score=0.0,
         intent_summary=body_text[:250],
-        status="ACCEPTED",
+        status="PENDING_EXTRACTION",
         raw_payload=payload
     )
     db.add(db_record)
@@ -128,63 +128,16 @@ async def list_rfqs(status_filter: Optional[str] = None, db: Session = Depends(g
     return {"status": "success", "count": len(records), "rfqs": records}
 
 
-@router.post("/process")
-async def process_sample_rfq(payload: Optional[Dict[str, Any]] = None, db: Session = Depends(get_db)):
-    """
-    Processes incoming raw RFQ payload and runs rule validations,
-    updating the record in PostgreSQL.
-    """
-    input_data = payload or {}
-
-    extracted_data = {
-        "transport_mode": "OCEAN",
-        "shipment_type": "FCL",
-        "origin": {"name": input_data.get("origin", "Shanghai"), "port_code": "CNSHA"},
-        "destination": {"name": input_data.get("destination", "Long Beach"), "port_code": "USLGB"},
-        "equipment": [{"quantity": input_data.get("equipment_quantity", 2), "type": input_data.get("equipment_type", "40' HC")}],
-        "cargo_ready_date": input_data.get("cargo_ready_date", "2026-09-10"),
-        "incoterm": input_data.get("incoterm", "FOB"),
-        "cargo_physicals": {
-            "gross_weight_kg": input_data.get("gross_weight_kg", 18500.0),
-            "volume_cbm": input_data.get("volume_cbm", 65.4),
-            "piece_count": input_data.get("piece_count", "20 Pallets")
-        },
-        "hazmat_special": {
-            "is_hazardous": input_data.get("is_hazardous", False),
-            "un_number": input_data.get("un_number", None),
-            "temperature_control": input_data.get("temperature_control", "Ambient")
-        },
-        "commercial_terms": {
-            "requested_validity": input_data.get("requested_validity", "2026-11-30"),
-            "target_rate_usd": input_data.get("target_rate_usd", 2100.0),
-            "payment_terms": input_data.get("payment_terms", "Net 30")
-        }
-    }
-
-    validation_results = [
-        {"field_name": "Incoterm Check", "outcome": "PASS"},
-        {"field_name": "Port UN/LOCODE Check", "outcome": "PASS"},
-        {"field_name": "Cargo Ready Date Check", "outcome": "PASS"},
-        {"field_name": "Weight & Volume Limits", "outcome": "PASS"},
-        {"field_name": "HazMat Compliance", "outcome": "PASS"}
-    ]
-
-    return {
-        "confidence_score": 96,
-        "data": extracted_data,
-        "validation": validation_results
-    }
-
-
 @router.post("/approve")
 async def approve_rfq_top_level(payload: ExtendedApprovalPayload, db: Session = Depends(get_db)):
     """
     Operator approval -> updates status to READY_FOR_PRICING in PostgreSQL.
     """
     db_record = db.query(RFQRecordModel).filter(RFQRecordModel.rfq_id == payload.rfq_id).first()
-    if db_record:
-        db_record.status = "APPROVED_READY_FOR_PRICING"
-        db.commit()
+    if not db_record:
+        raise HTTPException(status_code=404, detail=f"RFQ ID {payload.rfq_id} not found.")
+    db_record.status = "APPROVED_READY_FOR_PRICING"
+    db.commit()
 
     return {
         "status": "APPROVED",
@@ -241,36 +194,6 @@ async def create_clarification(rfq_id: UUID):
     # TODO: build draft from missing_fields, insert into clarification_drafts
     raise HTTPException(status_code=501, detail="Not implemented")
 
-@router.post("/poll-inbox")
-async def trigger_inbox_polling(
-    host: str = "imap.gmail.com",
-    username: str = "rfqs@example.com",
-    password: str = "app-password"
-):
-    """
-    Triggers an on-demand IMAP poll to scan the inbox for UNSEEN emails
-    and convert valid customer requests into RFQ records.
-    """
-    poller = IMAPEmailPoller(host=host, user=username, pass_code=password)
-    detected_rfqs = poller.fetch_unseen_rfqs()
-
-    ingested = []
-    for email_item in detected_rfqs:
-        rfq_id = str(uuid4())
-        ingested.append({
-            "rfq_id": rfq_id,
-            "sender": email_item["sender"],
-            "subject": email_item["subject"],
-            "attachments_count": len(email_item["attachments"])
-        })
-
-    return {
-        "status": "SUCCESS",
-        "emails_scanned": len(detected_rfqs),
-        "rfqs_ingested": ingested
-    }
-
-
 @router.get("/{rfq_id}/messages")
 async def get_rfq_messages(rfq_id: UUID):
     raise HTTPException(status_code=501, detail="Not implemented")
@@ -316,127 +239,85 @@ async def parse_attachment_file(file: UploadFile = File(...)):
 benchmark_engine = RateBenchmarkEngine()
 
 @router.post("/rate-benchmark")
-async def benchmark_rate(payload: dict):
-    origin = payload.get("origin_code", "CNSHA")
-    destination = payload.get("destination_code", "USLGB")
-    target_rate = float(payload.get("target_rate", 0.0))
+async def benchmark_rate(payload: dict, db: Session = Depends(get_db)):
+    origin = payload.get("origin_code")
+    destination = payload.get("destination_code")
+    if not origin or not destination:
+        raise HTTPException(status_code=400, detail="origin_code and destination_code are required.")
+    try:
+        target_rate = float(payload.get("target_rate") or 0.0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="target_rate must be a number")
+    if target_rate <= 0:
+        raise HTTPException(status_code=422, detail="target_rate must be greater than 0")
 
-    result = benchmark_engine.evaluate_target_rate(origin, destination, target_rate)
+    result = await benchmark_engine.evaluate_target_rate(
+        db, origin, destination, target_rate, equipment=payload.get("equipment")
+    )
     return {
         "status": "success",
         "benchmark": {
+            "status": result.status,
             "target_rate": result.target_rate,
             "market_avg_rate": result.market_avg_rate,
             "fuel_surcharge": result.fuel_surcharge,
             "variance_pct": result.variance_pct,
             "competitiveness": result.competitiveness,
-            "sources": result.index_sources
-        }
+            "as_of": result.as_of.isoformat() if result.as_of else None,
+            "notes": result.notes,
+            "sources": result.index_sources,
+        },
     }
 
 @router.post("/generate-quote-response")
 async def generate_quote_response(payload: QuoteResponseRequest):
-    """Generates a customer-facing quote response email draft."""
-    
-    # Calculate recommended quote rate (+5% operational margin if below market)
+    """Generates a customer-facing quote email DRAFT for human review. Nothing is sent."""
+
+    # Interim: the only rate available here is the one in the request (target_rate).
+    # Refuse a missing or zero rate instead of drafting a $0.00 quote.
     quoted_rate = payload.target_rate
-    
+    if not quoted_rate or quoted_rate <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No rate available. Enter an approved rate before generating a quote.",
+        )
+
+    draft_banner = "[DRAFT - confirm the rate and terms before sending, then delete this line]\n\n"
+
     formatted_body = (
+        f"{draft_banner}"
         f"Dear Logistics Team,\n\n"
-        f"Thank you for requesting a freight quote with Nixacom.\n\n"
-        f"We are pleased to offer the following ocean freight quote based on your inquiry:\n"
+        f"Thank you for your rate request. Please find our quote below.\n\n"
         f"--------------------------------------------------\n"
         f"• Route: {payload.origin} to {payload.destination}\n"
-        f"• Equipment Type: {payload.equipment}\n"
-        f"• All-In Ocean Rate: ${quoted_rate:,.2f} USD\n"
-        f"• Estimated Transit Time: 14 - 16 Days\n"
-        f"• Payment Terms: Net 30 Days\n"
-        f"• Quote Validity: 14 Days from issue\n"
+        f"• Equipment: {payload.equipment}\n"
+        f"• Rate: ${quoted_rate:,.2f} USD per container\n"
         f"--------------------------------------------------\n\n"
-        f"Port and government customs compliance checks (US CBP ACE / ETA) are cleared.\n\n"
-        f"Please reply 'CONFIRM' to accept this quote and receive your booking reference.\n\n"
+        f"Transit time, payment terms and quote validity will be confirmed with the final quote.\n\n"
+        f"To proceed, please reply to this email and our team will follow up with next steps.\n\n"
         f"Best regards,\n"
-        f"Nixacom Freight Automation Team"
+        f"Nixacom Freight Team"
     )
 
     return {
-        "status": "SUCCESS",
+        "status": "DRAFT",
+        "requires_human_review": True,
         "recipient": payload.customer_email,
-        "subject": f"Freight Quote Confirmation: {payload.origin} to {payload.destination} ({payload.equipment})",
+        "subject": f"Freight Quote: {payload.origin} to {payload.destination} ({payload.equipment})",
         "quote_email": formatted_body,
-        "gov_eta_status": "CLEARED",
-        "token_authenticated": True
-    }
-
-@router.get("/eta-gov-check/{port_code}")
-async def check_gov_eta_status(port_code: str):
-    """Simulates fetching real-time ETA and government customs clearance status."""
-    return {
-        "port_code": port_code,
-        "customs_clearance": "CLEARED_ACE",
-        "port_congestion_index": "LOW",
-        "est_transit_days": 14,
-        "gov_sanctions_check": "PASS",
-        "authenticated_via": "OAuth_Bearer_Token_v2"
     }
 
 @router.get("/gov-eta-lookup/{port_code}")
 async def get_gov_eta_lookup(port_code: str):
-    """Fetches ETA clearance status (uses mock response if live API credentials are unset)."""
-    api_base = os.getenv("CBP_ACE_API_BASE")
-    
-    # If no live API URL is configured, return the mock endpoint payload immediately
-    if not api_base or api_base == "https://api.cbp.dhs.gov/cargo/v1":
-        return {
-            "port_code": port_code,
-            "port_name": "Port of Long Beach",
-            "customs_status": "ACE_CLEARANCE_VERIFIED",
-            "terminal_congestion": "LOW (1.2 days avg wait)",
-            "estimated_transit_days": 15,
-            "gov_sanctions_check": "PASS",
-            "is_live_connection": False,
-            "mode": "DEMO_MOCK_MODE"
-        }
-
-    # Live connection attempt
-    try:
-        from app.core.auth import cbp_auth
-        bearer_token = await cbp_auth.get_valid_token()
-
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{api_base}/ports/{port_code}/clearance-status",
-                headers={"Authorization": f"Bearer {bearer_token}"},
-                timeout=5.0
-            )
-            if response.status_code == 200:
-                gov_data = response.json()
-                return {
-                    "port_code": port_code,
-                    "port_name": gov_data.get("port_name", "Port of Long Beach"),
-                    "customs_status": gov_data.get("ace_status", "ACE_CLEARANCE_VERIFIED"),
-                    "terminal_congestion": gov_data.get("congestion_index", "LOW"),
-                    "estimated_transit_days": gov_data.get("avg_transit_days", 15),
-                    "is_live_connection": True
-                }
-    except Exception:
-        pass  # Fall through to mock output if live network request fails
-
-    # Fallback mock payload
-    return {
-        "port_code": port_code,
-        "port_name": "Port of Long Beach",
-        "customs_status": "ACE_CLEARANCE_VERIFIED",
-        "terminal_congestion": "LOW (1.2 days avg wait)",
-        "estimated_transit_days": 15,
-        "is_live_connection": False,
-        "mode": "FALLBACK_MOCK_MODE"
-    }
-
-@router.get("/gov-eta-lookup/{port_code}")
-async def get_gov_eta_lookup(port_code: str):
-    # Uses cbp_auth to fetch bearer token and query the external government endpoint
-    pass
+    """
+    Government ETA / customs status lookup. NOT IMPLEMENTED for the demo: no verified
+    data source is configured, so this never returns invented customs, congestion or
+    sanctions results.
+    """
+    raise HTTPException(
+        status_code=503,
+        detail="Customs/ETA lookup is not configured. No data source has been verified.",
+    )
 
 
 @router.post("/analyze-rfq")

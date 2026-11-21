@@ -3,6 +3,27 @@
 import { useState } from "react";
 import { jsPDF } from "jspdf";
 
+// Set NEXT_PUBLIC_API_BASE_URL in .env.local (or the host's env settings) when deploying.
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+// Demo banner is ON unless NEXT_PUBLIC_DEMO_MODE is set to "false".
+const DEMO_MODE = process.env.NEXT_PUBLIC_DEMO_MODE !== "false";
+
+const DEMO_DISCLAIMER =
+  "Demo notice: Rates, benchmarks and market comparisons shown here are sample data or internally entered " +
+  "carrier/forwarder quotes. Any lane marked \"Demo data\" is illustrative and not a live market rate, quote or offer. " +
+  "No third-party market index data is included. Pricing, surcharges, transit times and availability must be " +
+  "confirmed with carriers before any quote is sent to a customer.";
+
+// Turns a failed response into a readable message (uses the server's "detail" when present).
+async function errorDetail(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    if (typeof body?.detail === "string") return body.detail;
+    if (Array.isArray(body?.detail)) return body.detail.map((d: any) => d.msg).join("; ");
+  } catch {}
+  return `HTTP ${res.status}`;
+}
+
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<'workspace' | 'logs' | 'performance'>('workspace');
 
@@ -87,7 +108,7 @@ export default function Dashboard() {
     addLog("INFO", "Mailbox Listener", "Sending inbound payload to /api/rfqs/ingest...");
 
     try {
-      const response = await fetch("http://localhost:8000/api/rfqs/ingest", {
+      const response = await fetch(`${API_BASE}/api/rfqs/ingest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -100,7 +121,7 @@ export default function Dashboard() {
       addLog("SUCCESS", "FastAPI Ingest", `Ingested RFQ ID: ${data.rfq_id || "Assigned by backend"}`);
     } catch (error: any) {
       console.error("Failed email detection hook:", error);
-      setParseError(`Backend ingestion failed: ${error.message || "Unable to reach localhost:8000"}`);
+      setParseError(`Backend ingestion failed: ${error.message || `Unable to reach ${API_BASE}`}`);
       addLog("ERROR", "FastAPI Ingest", `Failed to connect to /api/rfqs/ingest (${error.message})`);
     } finally {
       setDetectingEmail(false);
@@ -120,7 +141,7 @@ export default function Dashboard() {
     addLog("INFO", "DeepSeek AI", "Sending RFQ text to /api/rfqs/analyze-rfq...");
 
     try {
-      const response = await fetch("http://localhost:8000/api/rfqs/analyze-rfq", {
+      const response = await fetch(`${API_BASE}/api/rfqs/analyze-rfq`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rfq_text: emailText })
@@ -216,7 +237,7 @@ export default function Dashboard() {
       }
     } catch (error: any) {
       console.error("Failed to parse RFQ via DeepSeek API:", error);
-      setParseError(`Extraction failed: ${error.message || "Backend server unreachable at localhost:8000"}`);
+      setParseError(`Extraction failed: ${error.message || `Backend server unreachable at ${API_BASE}`}`);
       addLog("ERROR", "DeepSeek AI", `Extraction error: ${error.message || "Connection refused"}`);
     } finally {
       setLoading(false);
@@ -243,7 +264,7 @@ export default function Dashboard() {
     addLog("INFO", "Feasibility Engine", "Evaluating live shipment parameters via /api/rfqs/feasibility...");
 
     try {
-      const response = await fetch("http://localhost:8000/api/rfqs/feasibility", {
+      const response = await fetch(`${API_BASE}/api/rfqs/feasibility`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -273,27 +294,28 @@ export default function Dashboard() {
     const payload = {
       origin_code: rec.origin?.port_code || rec.origin?.name,
       destination_code: rec.destination?.port_code || rec.destination?.name,
-      target_rate: rec.commercial_terms?.target_rate_usd
+      target_rate: rec.commercial_terms?.target_rate_usd,
+      equipment: rec.equipment?.[0]?.type
     };
 
-    addLog("INFO", "Rate Benchmark", "Fetching live rate benchmark via /api/rfqs/rate-benchmark...");
+    addLog("INFO", "Rate Benchmark", "Fetching rate reference via /api/rfqs/rate-benchmark...");
 
     try {
-      const benchRes = await fetch("http://localhost:8000/api/rfqs/rate-benchmark", {
+      const benchRes = await fetch(`${API_BASE}/api/rfqs/rate-benchmark`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
-      if (!benchRes.ok) throw new Error(`HTTP ${benchRes.status}`);
+      if (!benchRes.ok) throw new Error(await errorDetail(benchRes));
       const benchData = await benchRes.json();
       setBenchmark(benchData.benchmark || benchData);
 
       setApprovalStatus({
-        status: "ACCEPTED",
+        status: "REVIEWED",
         rfq_id: emailDetectionStatus?.rfq_id || `RFQ-${Date.now().toString().slice(-5)}`,
-        message: "RFQ approved and routed to market pricing queue."
+        message: "Rate reference retrieved. Nothing has been sent or saved to a pricing queue."
       });
-      addLog("SUCCESS", "Pricing Queue", "Benchmark retrieved and RFQ routed to pricing.");
+      addLog("SUCCESS", "Rate Reference", "Rate reference retrieved for review.");
     } catch (error: any) {
       console.error("Failed to approve RFQ:", error);
       setParseError(`Rate benchmark failed: ${error.message}`);
@@ -330,7 +352,7 @@ export default function Dashboard() {
     addLog("INFO", "Quote Generator", "Requesting outbound quote draft from /api/rfqs/generate-quote-response...");
 
     try {
-      const res = await fetch("http://localhost:8000/api/rfqs/generate-quote-response", {
+      const res = await fetch(`${API_BASE}/api/rfqs/generate-quote-response`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -340,7 +362,7 @@ export default function Dashboard() {
           target_rate: rec.commercial_terms?.target_rate_usd
         })
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(await errorDetail(res));
       const data = await res.json();
       setQuoteDraft(data);
       setShowQuoteModal(true);
@@ -369,8 +391,7 @@ export default function Dashboard() {
       : "N/A";
 
     const baseRate = Number(rec.commercial_terms?.target_rate_usd || 0);
-    const fuelSurcharge = Number(benchmark?.fuel_surcharge || 0);
-    const totalRate = baseRate + fuelSurcharge;
+    const totalRate = baseRate; // same figure as the email draft; no extra surcharge added
 
     // PAGE 1: TSU DARK BLUE COVER PAGE
     doc.setFillColor(27, 42, 75);
@@ -406,7 +427,7 @@ export default function Dashboard() {
     doc.setFont("Helvetica", "bold");
     doc.setFontSize(9);
     doc.setTextColor(160, 174, 192);
-    doc.text("PROPOSAL FOR", 20, startY);
+    doc.text("DRAFT QUOTE FOR", 20, startY);
 
     doc.setFontSize(15);
     doc.setTextColor(255, 255, 255);
@@ -414,7 +435,7 @@ export default function Dashboard() {
 
     doc.setFontSize(9);
     doc.setTextColor(160, 174, 192);
-    doc.text("SOLICITATION / QUOTE REF", 20, startY + spacing);
+    doc.text("QUOTE REFERENCE", 20, startY + spacing);
 
     doc.setFontSize(15);
     doc.setTextColor(255, 255, 255);
@@ -447,7 +468,7 @@ export default function Dashboard() {
     doc.setFontSize(10);
     doc.setFont("Helvetica", "normal");
     doc.setTextColor(100, 116, 139);
-    doc.text("OFFICIAL COMMERCIAL FREIGHT QUOTATION", 14, 26);
+    doc.text("DRAFT FREIGHT QUOTATION - FOR REVIEW, NOT AN OFFER", 14, 26);
     doc.text(`Date: ${new Date().toLocaleDateString()}`, 14, 31);
 
     doc.setLineWidth(0.5);
@@ -479,14 +500,11 @@ export default function Dashboard() {
 
     doc.setFont("Helvetica", "normal");
     doc.setFontSize(9);
-    doc.text(`1. Base Ocean Freight Rate (${equipStr}):`, 14, 83);
+    doc.text(`1. Ocean Freight Rate per container (${equipStr}):`, 14, 83);
     doc.text(`$${baseRate.toFixed(2)} USD`, 160, 83);
 
-    doc.text("2. Fuel Surcharge (Live Benchmark):", 14, 89);
-    doc.text(`$${fuelSurcharge.toFixed(2)} USD`, 160, 89);
-
     doc.setFont("Helvetica", "bold");
-    doc.text("Total Quoted Freight Charges:", 14, 98);
+    doc.text("Rate per container (draft):", 14, 98);
     doc.text(`$${totalRate.toFixed(2)} USD`, 160, 98);
 
     doc.line(14, 104, 196, 104);
@@ -500,6 +518,13 @@ export default function Dashboard() {
     doc.setTextColor(51, 65, 85);
     const splitText = doc.splitTextToSize(quoteDraft.quote_email || "", 180);
     doc.text(splitText, 14, 119);
+
+    if (DEMO_MODE) {
+      doc.setFont("Helvetica", "italic");
+      doc.setFontSize(7);
+      doc.setTextColor(100, 116, 139);
+      doc.text(doc.splitTextToSize(DEMO_DISCLAIMER, 180), 14, 262);
+    }
 
     doc.save(`Nixacom-Quote-${origin}-${destination}.pdf`);
     addLog("SUCCESS", "PDF Compiler", `Exported PDF quote for ${origin} → ${destination}`);
@@ -521,7 +546,7 @@ export default function Dashboard() {
         <div className="flex gap-2 text-[10px] font-mono">
           <span className="bg-slate-800 border border-slate-700 text-slate-300 px-2.5 py-1 rounded-full flex items-center gap-1.5 shadow-sm">
             <span className={`w-1.5 h-1.5 rounded-full ${parseError ? "bg-rose-400" : "bg-emerald-400 animate-pulse"}`}></span>
-            Backend: localhost:8000
+            Backend: {API_BASE.replace(/^https?:\/\//, "")}
           </span>
         </div>
       </header>
@@ -565,6 +590,13 @@ export default function Dashboard() {
           </span>
         </button>
       </div>
+
+      {DEMO_MODE && (
+        <div className="mb-6 p-3 bg-amber-950/50 border border-amber-500/40 rounded-lg text-xs text-amber-200">
+          <strong>Demo mode:</strong> rates shown are sample or internally entered data, not live market rates.
+          Confirm pricing, surcharges, transit times and availability with carriers before quoting a customer.
+        </div>
+      )}
 
       {/* Live Error Banner */}
       {parseError && (
@@ -747,23 +779,23 @@ export default function Dashboard() {
                   {benchmark && (
                     <div className="mb-6 p-4 bg-slate-900/80 border border-emerald-500/30 rounded-lg">
                       <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">Market Rate Benchmark & Fuel Surcharge</span>
+                        <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">Rate Reference (sanity check, not a quote)</span>
                         <span className="text-xs font-bold px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-500/30">
-                          {benchmark.competitiveness} {benchmark.variance_pct !== undefined ? `(${benchmark.variance_pct}%)` : ""}
+                          {benchmark.competitiveness} {benchmark.variance_pct != null ? `(${benchmark.variance_pct}%)` : ""}
                         </span>
                       </div>
 
                       <div className="grid grid-cols-3 gap-2 text-xs text-slate-300 mt-3">
                         <div>
-                          Market Avg:{" "}
+                          Reference Avg:{" "}
                           <strong className="text-white">
-                            {benchmark.market_avg_rate !== undefined ? `$${benchmark.market_avg_rate}` : "N/A"}
+                            {benchmark.market_avg_rate != null ? `$${benchmark.market_avg_rate}` : "N/A"}
                           </strong>
                         </div>
                         <div>
                           Fuel Surcharge:{" "}
                           <strong className="text-white">
-                            {benchmark.fuel_surcharge !== undefined ? `$${benchmark.fuel_surcharge}` : "N/A"}
+                            {benchmark.fuel_surcharge != null ? `$${benchmark.fuel_surcharge}` : "N/A"}
                           </strong>
                         </div>
                         <div>
@@ -773,6 +805,20 @@ export default function Dashboard() {
                           </strong>
                         </div>
                       </div>
+
+                      {(benchmark.status && benchmark.status !== "OK") && (
+                        <p className="mt-3 text-xs font-semibold text-amber-400">
+                          ⚠ Rate status: {benchmark.status}. Do not quote from this benchmark without review.
+                        </p>
+                      )}
+                      {benchmark.notes?.map((n: string, i: number) => (
+                        <p key={i} className="mt-1 text-xs text-slate-400">{n}</p>
+                      ))}
+                      {benchmark.as_of && (
+                        <p className="mt-2 text-[11px] text-slate-500">
+                          Rate as of {new Date(benchmark.as_of).toLocaleString()} · {benchmark.sources?.base_rate_index?.source}
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -1074,7 +1120,7 @@ export default function Dashboard() {
 
             {sentConfirmation ? (
               <div className="p-3 bg-emerald-950 text-emerald-400 border border-emerald-500/30 rounded text-center text-xs font-semibold">
-                ✓ Outbound response queued!
+                ✓ Draft marked approved. Nothing was sent. Copy the email to send it yourself.
               </div>
             ) : (
               <div className="flex justify-end gap-3">
@@ -1092,7 +1138,16 @@ export default function Dashboard() {
                 </button>
                 <button
                   onClick={() => {
-                    addLog("SUCCESS", "Outbound Queue", "Approved quote response queued for customer.");
+                    navigator.clipboard?.writeText(quoteDraft.quote_email || "");
+                    addLog("INFO", "Quote Draft", "Email text copied to clipboard.");
+                  }}
+                  className="bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs px-4 py-2 rounded cursor-pointer"
+                >
+                  Copy Email Text
+                </button>
+                <button
+                  onClick={() => {
+                    addLog("INFO", "Quote Draft", "Draft marked approved. Nothing was sent.");
                     setSentConfirmation(true);
                     setTimeout(() => {
                       setShowQuoteModal(false);
@@ -1101,12 +1156,17 @@ export default function Dashboard() {
                   }}
                   className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-4 py-2 rounded font-medium cursor-pointer"
                 >
-                  Approve & Send to Customer
+                  Mark Draft Approved (not sent)
                 </button>
               </div>
             )}
           </div>
         </div>
+      )}
+      {DEMO_MODE && (
+        <footer className="mt-8 pt-4 border-t border-slate-800 text-[11px] text-slate-500">
+          {DEMO_DISCLAIMER}
+        </footer>
       )}
     </main>
   );
