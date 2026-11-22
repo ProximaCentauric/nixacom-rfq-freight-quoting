@@ -14,6 +14,20 @@ const DEMO_DISCLAIMER =
   "No third-party market index data is included. Pricing, surcharges, transit times and availability must be " +
   "confirmed with carriers before any quote is sent to a customer.";
 
+// Reads a UN/LOCODE (e.g. "VNSGN") from text like "Ho Chi Minh City, VN (VNSGN)".
+// allowBare=true also accepts a plain 5-character code (use only for fields that are meant to be codes).
+function extractLocode(text?: string | null, allowBare = false): string | null {
+  if (!text) return null;
+  const t = String(text).trim();
+  if (allowBare && /^[A-Za-z]{2}[A-Za-z0-9]{3}$/.test(t)) return t.toUpperCase();
+  const m = t.match(/\(([A-Za-z]{2}[A-Za-z0-9]{3})\)/);
+  return m ? m[1].toUpperCase() : null;
+}
+// "Ho Chi Minh City, VN (VNSGN)" -> "Ho Chi Minh City, VN"
+function stripLocode(text?: string | null): string {
+  return String(text ?? "").replace(/\s*\([A-Za-z]{2}[A-Za-z0-9]{3}\)\s*$/, "").trim();
+}
+
 // Turns a failed response into a readable message (uses the server's "detail" when present).
 async function errorDetail(res: Response): Promise<string> {
   try {
@@ -120,7 +134,7 @@ export default function Dashboard() {
       setEmailDetectionStatus(data);
       addLog("SUCCESS", "FastAPI Ingest", `Ingested RFQ ID: ${data.rfq_id || "Assigned by backend"}`);
     } catch (error: any) {
-      console.error("Failed email detection hook:", error);
+      console.warn("Failed email detection hook:", error);
       setParseError(`Backend ingestion failed: ${error.message || `Unable to reach ${API_BASE}`}`);
       addLog("ERROR", "FastAPI Ingest", `Failed to connect to /api/rfqs/ingest (${error.message})`);
     } finally {
@@ -164,12 +178,12 @@ export default function Dashboard() {
           intent_summary: liveAiData.intent_summary || null,
           data: {
             origin: {
-              name: liveAiData.origin || "N/A",
-              port_code: liveAiData.origin_code || liveAiData.origin || "N/A"
+              name: stripLocode(liveAiData.origin) || "N/A",
+              port_code: extractLocode(liveAiData.origin_code, true) || extractLocode(liveAiData.origin) || "N/A"
             },
             destination: {
-              name: liveAiData.destination || "N/A",
-              port_code: liveAiData.destination_code || liveAiData.destination || "N/A"
+              name: stripLocode(liveAiData.destination) || "N/A",
+              port_code: extractLocode(liveAiData.destination_code, true) || extractLocode(liveAiData.destination) || "N/A"
             },
             equipment: [
               {
@@ -236,7 +250,7 @@ export default function Dashboard() {
         throw new Error(apiResult.message || "Invalid response format from backend");
       }
     } catch (error: any) {
-      console.error("Failed to parse RFQ via DeepSeek API:", error);
+      console.warn("Failed to parse RFQ via DeepSeek API:", error);
       setParseError(`Extraction failed: ${error.message || `Backend server unreachable at ${API_BASE}`}`);
       addLog("ERROR", "DeepSeek AI", `Extraction error: ${error.message || "Connection refused"}`);
     } finally {
@@ -275,7 +289,7 @@ export default function Dashboard() {
       setFeasibility(result);
       addLog("SUCCESS", "Feasibility Engine", `Verdict returned: ${result.verdict || "COMPLETED"}`);
     } catch (error: any) {
-      console.error("Feasibility check failed:", error);
+      console.warn("Feasibility check failed:", error);
       setParseError(`Feasibility check failed: ${error.message}`);
       addLog("ERROR", "Feasibility Engine", `Check failed: ${error.message}`);
     } finally {
@@ -317,8 +331,15 @@ export default function Dashboard() {
       });
       addLog("SUCCESS", "Rate Reference", "Rate reference retrieved for review.");
     } catch (error: any) {
-      console.error("Failed to approve RFQ:", error);
-      setParseError(`Rate benchmark failed: ${error.message}`);
+      console.warn("Failed to approve RFQ:", error);
+      const missingCode = String(error.message || "").startsWith("Could not read a 5-character port code");
+      setParseError(
+        missingCode
+          ? "Rate reference needs a full 5-letter port code (UN/LOCODE) for both ports, e.g. CNNGB for Ningbo " +
+            "(not NGB). Add it to the RFQ text, like \"Ningbo, CN (CNNGB)\", and parse again. " +
+            `Details: ${error.message}`
+          : `Rate benchmark failed: ${error.message}`
+      );
       addLog("ERROR", "Rate Benchmark", `Benchmark error: ${error.message}`);
     } finally {
       setApproving(false);
@@ -368,7 +389,7 @@ export default function Dashboard() {
       setShowQuoteModal(true);
       addLog("SUCCESS", "Quote Generator", "Outbound quote draft compiled successfully.");
     } catch (err: any) {
-      console.error("Quote generation failed:", err);
+      console.warn("Quote generation failed:", err);
       setParseError(`Quote generation failed: ${err.message}`);
       addLog("ERROR", "Quote Generator", `Failed: ${err.message}`);
     } finally {
@@ -586,7 +607,7 @@ export default function Dashboard() {
         >
           📈 Performance & Analytics
           <span className="px-1.5 py-0.5 rounded-full bg-slate-900 text-[10px] text-emerald-400 font-mono">
-            {perfMetrics.totalProcessed > 0 ? `${perfMetrics.avgConfidence}% Acc` : "0 Runs"}
+            {perfMetrics.totalProcessed > 0 ? `${perfMetrics.avgConfidence}% Conf` : "0 Runs"}
           </span>
         </button>
       </div>
@@ -882,7 +903,7 @@ export default function Dashboard() {
                         </li>
                       ))
                     ) : (
-                      <li className="text-xs text-slate-400 italic">No validation rules returned by backend for this payload.</li>
+                      <li className="text-xs text-slate-400 italic">No rule validation was run for this record (not enabled in this demo build).</li>
                     )}
                   </ul>
                 </div>

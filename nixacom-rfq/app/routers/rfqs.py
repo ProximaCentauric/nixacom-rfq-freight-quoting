@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File
 from sqlalchemy.orm import Session
 from uuid import uuid4
 import os
+import re
 import httpx
 
 from app.database import get_db
@@ -39,6 +40,18 @@ from app.schemas import (
 
 
 router = APIRouter(prefix="/api/rfqs", tags=["rfqs"])
+
+_LOCODE_IN_PARENS = re.compile(r"\(([A-Za-z]{2}[A-Za-z0-9]{3})\)")
+_BARE_LOCODE = re.compile(r"[A-Za-z]{2}[A-Za-z0-9]{3}")
+
+
+def _extract_locode(value) -> Optional[str]:
+    """'VNSGN' or 'Ho Chi Minh City, VN (VNSGN)' -> 'VNSGN'. Anything else -> None."""
+    text = str(value or "").strip()
+    if _BARE_LOCODE.fullmatch(text):
+        return text.upper()
+    match = _LOCODE_IN_PARENS.search(text)
+    return match.group(1).upper() if match else None
 
 def is_valid_rfq_email(subject: str, body_text: str) -> bool:
     """Basic keyword check to verify if an incoming email looks like an RFQ."""
@@ -93,10 +106,12 @@ async def create_rfq_from_email(payload: dict, db: Session = Depends(get_db)):
         rfq_id=generated_rfq_id,
         sender=sender,
         subject=subject,
-        origin=None,
-        destination=None,
-        equipment_type=None,
-        equipment_quantity=None,
+        # models.py marks these columns NOT NULL, so store empty placeholders.
+        # They are NOT extracted values; status PENDING_EXTRACTION says so.
+        origin="",
+        destination="",
+        equipment_type="",
+        equipment_quantity=0.0,
         target_rate_usd=None,
         confidence_score=0.0,
         intent_summary=body_text[:250],
@@ -240,10 +255,18 @@ benchmark_engine = RateBenchmarkEngine()
 
 @router.post("/rate-benchmark")
 async def benchmark_rate(payload: dict, db: Session = Depends(get_db)):
-    origin = payload.get("origin_code")
-    destination = payload.get("destination_code")
+    raw_origin = payload.get("origin_code")
+    raw_destination = payload.get("destination_code")
+    origin = _extract_locode(raw_origin)
+    destination = _extract_locode(raw_destination)
     if not origin or not destination:
-        raise HTTPException(status_code=400, detail="origin_code and destination_code are required.")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not read a 5-character port code (UN/LOCODE, e.g. VNSGN) from "
+                f"origin '{raw_origin}' / destination '{raw_destination}'."
+            ),
+        )
     try:
         target_rate = float(payload.get("target_rate") or 0.0)
     except (TypeError, ValueError):

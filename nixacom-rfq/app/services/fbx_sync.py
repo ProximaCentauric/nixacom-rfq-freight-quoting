@@ -2,9 +2,16 @@
 Freightos Baltic Index (FBX) sync - PLACEHOLDER until you have API access.
 
 Everything you need to change is marked  >>> REPLACE <<<  (3 places).
-Nothing here runs unless FBX_API_KEY and FBX_API_BASE are set in .env, so it
-is safe to deploy as-is: the rest of the app keeps using whatever rates are
-already in the lane_rates table.
+
+SAFE BY DEFAULT. Nothing here runs unless ALL of these are true:
+  1. FBX_LICENSE_CONFIRMED=true is set in .env. Set it ONLY after you hold Freightos
+     API access under a signed order AND have read the Freightos Data Terms and
+     Conditions (use is limited to what the order allows; benchmarking in dealings
+     with third parties and showing the data to prospects need the order's permission).
+  2. FBX_API_KEY and FBX_API_BASE are set in .env.
+  3. The three REPLACE items below have been filled in from Freightos' API docs.
+Until then the sync endpoint returns a 503 with a plain explanation, and the rest of
+the app keeps using whatever rates are already in the lane_rates table.
 
 Flow: fetch_fbx_rates() -> list of lane dicts -> sync_fbx_rates() stores them
 in lane_rates -> the benchmark engine picks up the newest one per lane.
@@ -38,7 +45,16 @@ FBX_LANE_MAP: dict[str, str] = {
 }
 
 
+# >>> REPLACE (2/3) <<<  Endpoint path from Freightos' API docs (replace the whole string).
+ENDPOINT_PATH = "REPLACE_WITH_ENDPOINT_PATH"
+
+
 def _config() -> tuple[str, str]:
+    if os.getenv("FBX_LICENSE_CONFIRMED", "").strip().lower() != "true":
+        raise FBXNotConfigured(
+            "FBX sync is disabled until the Freightos license terms are confirmed. "
+            "Set FBX_LICENSE_CONFIRMED=true only after that."
+        )
     key = os.getenv("FBX_API_KEY")
     base = os.getenv("FBX_API_BASE")
     if not key or not base:
@@ -50,9 +66,14 @@ async def fetch_fbx_rates() -> list[dict[str, Any]]:
     """Return [{lane_key, rate_usd_per_feu, as_of(datetime, UTC)}, ...]."""
     key, base = _config()
 
-    # >>> REPLACE (2/3) <<<  Request exactly as Freightos' docs describe:
-    # endpoint path, auth scheme (Bearer token vs API-key header), query params.
-    url = f"{base}/REPLACE_WITH_ENDPOINT_PATH"
+    if ENDPOINT_PATH.startswith("REPLACE") or not FBX_LANE_MAP:
+        raise FBXNotConfigured(
+            "FBX sync is still a template: fill in ENDPOINT_PATH and FBX_LANE_MAP in fbx_sync.py."
+        )
+
+    # >>> REPLACE (2/3, continued) <<<  Auth scheme (Bearer token vs API-key header) and
+    # query params exactly as Freightos' docs describe.
+    url = f"{base}/{ENDPOINT_PATH.lstrip('/')}"
     headers = {"Authorization": f"Bearer {key}"}
 
     async with httpx.AsyncClient(timeout=15.0) as client:
